@@ -4,6 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ShapeError(Exception):
+    pass
+
+
 class ConvolutionalLayer(nn.Module):
     def __init__(
             self,
@@ -38,56 +42,12 @@ class ConvolutionalLayer(nn.Module):
                 momentum=0.01,
                 eps=1e-6)
 
-    def forward(self, x):
-        print(self)
-        print('x', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, l], end=', ')
-        print()
-        print('x', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, 4001+l], end=', ')
-        print()
-        print()
-        
+    def forward(self, x):        
         x = self.conv(x)
-        
-        print('a', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, l], end=', ')
-        print()
-        print('a', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, 4001+l], end=', ')
-        print()
-        print()
-        
         if self.batch_normalize:
             x = self.batchnorm(x)
-        
-        print('b', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, l], end=', ')
-        print()
-        print('b', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, 4001+l], end=', ')
-        print()
-        print()
-        
         if self.activation:
             x = F.leaky_relu(x, negative_slope=0.1)
-        
-        print('c', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, l], end=', ')
-        print()
-        print('c', end='  ')
-        for l in range(10):
-            print('%e' % x.reshape(x.shape[0], -1)[0, 4001+l], end=', ')
-        print()
-        print()
-        
         return x
 
 
@@ -109,44 +69,59 @@ class MaxPoolLayer(nn.Module):
         self.pad_b = padding - 2*(padding//2)
     
     def forward(self, x):
-        #print(self)
         if self.pad_a or self.pad_b:
-            #print(x.shape)
             x = F.pad(x, (self.pad_a, self.pad_b, self.pad_a, self.pad_b), mode='constant', value=self.value)
-            #print(x.shape)
         x = F.max_pool2d(x, kernel_size=self.kernel_size, stride=self.stride)
-        #print(x.shape)
         return x
 
 
 class YOLOv3Layer(nn.Module):
     # TODO: loss function
-    def __init__(self, classes=80, anchors=[]):
+    def __init__(self, input_width, input_height, classes=80, anchors=[]):
         super().__init__()
         self.anchors = anchors
         self.classes = classes
+        self.input_width = input_width
+        self.input_height = input_height
     
     def forward(self, x):
-        #print(self)
-        assert x.shape[1] == len(self.anchors)*(4+1+self.classes)
+        num_boxes = len(self.anchors)
+        skip_length = (4+1+self.classes)
+        if x.shape[1] != num_boxes*skip_length:
+            raise ShapeError('no. filters != no. boxes * (5 + no. classes)')
         
-        # Undo reshape.
-        # Return batch x 3 x 255 after box conversion
-        # Then we can join with other predictions
+        x = x.transpose(1, 2).transpose(2, 3)
         
-        x = x.transpose(1, 2)
-        x = x.transpose(2, 3)
-        x = x.reshape(x.shape[0], x.shape[1], x.shape[2], 3, -1)
         # Convert predictions to logistic where appropriate
-        x[:,:,:,:,0:2]  = torch.sigmoid(x[:,:,:,:,0:2])
-        x[:,:,:,:,4:] = torch.sigmoid(x[:,:,:,:,4:])
-        return x
+        for box in range(num_boxes):
+            xa, xb = box*skip_length, box*skip_length + 2
+            x[:,:,:,xa:xb] = torch.sigmoid(x[:,:,:,xa:xb])
+            xa, xb = box*skip_length+4, box*skip_length+4 + 1+self.classes
+            x[:,:,:,xa:xb] = torch.sigmoid(x[:,:,:,xa:xb])
+        
+        # Do the box resizing
+        for box in range(num_boxes):
+            pw, ph = self.anchors[box]
+            for row in range(x.shape[1]):
+                for col in range(x.shape[2]):
+                    offset = box*skip_length
+                    x[:,row,col,offset+0] = (x[:,row,col,offset+0].item() + col)/x.shape[2]
+                    x[:,row,col,offset+1] = (x[:,row,col,offset+1].item() + row)/x.shape[1]
+                    x[:,row,col,offset+2] = pw/self.input_width*torch.exp(x[:,row,col,offset+2]).item()
+                    x[:,row,col,offset+3] = ph/self.input_height*torch.exp(x[:,row,col,offset+3]).item()
+        
+        # Returns batch x num predictions x prediction
+        # but only for nonzero scores
+        x = x.contiguous().view(x.shape[0], -1, x.shape[-1]//num_boxes)
+        mask = x[:,:,4] > 1e-6
+        # https://discuss.pytorch.org/t/select-rows-of-the-tensor-whose-first-element-is-equal-to-some-value/1718/2
+        return x[:,mask.squeeze(),:]
 
 
 class TinyYOLOv3(nn.Module):
-    def __init__(self):
+    def __init__(self, width, height):
         super().__init__()
-        self.w, self.h = None, None
+        self.w, self.h = width, height
         self.images_seen = 0
         
         self.block1 = nn.ModuleList([
@@ -167,7 +142,8 @@ class TinyYOLOv3(nn.Module):
         self.block3 = nn.ModuleList([
             ConvolutionalLayer(256, 512, 3, 1, 1),
             ConvolutionalLayer(512, 255, 1, 1, 0, batch_normalize=False, activation=False),
-            YOLOv3Layer(classes=80, anchors=[(81, 82),  (135, 169),  (344, 319)])
+            YOLOv3Layer(input_width=self.w, input_height=self.h,
+                        classes=80, anchors=[(81, 82),  (135, 169),  (344, 319)])
         ])
         
         self.block4 = ConvolutionalLayer(256, 128, 1, 1, 0)
@@ -175,33 +151,38 @@ class TinyYOLOv3(nn.Module):
         self.block5 = nn.ModuleList([
             ConvolutionalLayer(384, 256, 3, 1, 1),
             ConvolutionalLayer(256, 255, 1, 1, 0, batch_normalize=False, activation=False),
-            YOLOv3Layer(classes=80, anchors=[(10, 14),  (23, 27),  (37, 58)])
+            YOLOv3Layer(input_width=self.w, input_height=self.h,
+                        classes=80, anchors=[(10, 14),  (23, 27),  (37, 58)])
         ])
     
     def forward(self, x):
+        if self.training:
+            self.images_seen += x.shape[0]
+        
         # First block, with a checkpoint for the layer 8 exit
         for layer in self.block1:
             x = layer(x)
-        #x8 = x.clone()
+        x8 = x.clone()
         
         # Second block, with a checkpoint for the layer 13 exit
         for layer in self.block2:
             x = layer(x)
-        #x13 = x.clone()
+        x13 = x.clone()
         
         # First YOLO block
         for layer in self.block3:
             x = layer(x)
+        y1 = x.clone()
         
         ## Route layer + conv + upscaling
-        #x = F.interpolate(self.block4(x13), scale_factor=2)
-        #
-        ## Concatenate w/layer 8 plus final YOLO layer
-        #x = torch.cat((x, x8), dim=1)
-        #for layer in self.block5:
-        #    x = layer(x)
+        x = F.interpolate(self.block4(x13), scale_factor=2)
         
-        return x
+        # Concatenate w/layer 8 plus final YOLO layer
+        x = torch.cat((x, x8), dim=1)
+        for layer in self.block5:
+            x = layer(x)
+        
+        return torch.cat((x, y1), dim=1)
 
 
 def _load_into_tensor(tensor, weights, offset, size):
@@ -239,11 +220,100 @@ def load_weights(file, network):
               'offset = {}, weights.size = {}'.format(offset, weights.size))
 
 
+## Helpers cf. Darknet
+class Box(object):
+    def __init__(self, xc, yc, w, h):
+        assert w > 0
+        assert h > 0
+        self.x1 = xc-w/2
+        self.x2 = xc+w/2
+        self.y1 = yc-h/2
+        self.y2 = yc+h/2
+    
+    def __repr__(self):
+        return f'<Box(({self.x1}, {self.y1}), ({self.x2}, {self.y2}))>'
+    
+    @property
+    def area(self):
+        return (self.x2-self.x1)*(self.y2-self.y1)
+    
+    def intersection(self, other):
+        if self.x1 > other.x2 or self.x2 < other.x1 \
+        or self.y1 > other.y2 or self.y2 < other.y1:
+            return 0
+        
+        w = min(self.x2, other.x2)-max(self.x1, other.x1)
+        h = min(self.y2, other.y2)-max(self.y1, other.y1)
+        return w*h
+    
+    def iou(self, other):
+        i = self.intersection(other)
+        u = self.area+other.area
+        return i/u
+    
+    @staticmethod
+    def from_tensor(t):
+        s = t.data
+        return Box.from_array(s)
+    
+    @staticmethod
+    def from_array(a):
+        return Box(*a[0:4])
+
+
+class Detection(object):
+    def __init__(self, t):
+        # Get rid of torch stuff
+        if len(t.shape) > 1:
+            raise ShapeError('expected a 1-D tensor')
+        
+        s = np.array(t.data)
+        self.classes = s.shape[0] - 5
+        self.box = Box.from_array(s)
+        self.objectness = s[4]
+        self.class_prob = s[5:]
+        self.prob = self.objectness*self.class_prob
+    
+    def __repr__(self):
+        return f'<Detection({self.classes} classes, obj={self.objectness:.5f}, prob=[{self.prob[0]:.5f}, {self.prob[1]:.5f}, ...])>'
+
+
+def get_yolo_detections(yolo_tensor, classes, thresh, orig_w, orig_h, scaled_w, scaled_h):
+    num_dets = yolo_tensor.shape[0]
+    if len(yolo_tensor.shape) > 2:
+        raise ShapeError('get_detections only supports 1 image')
+    if yolo_tensor.shape[-1]//(5+classes) != 1:
+        raise ShapeError('bad tensor size maths or wrong no. classes')
+    
+    dets = []
+    for i in range(num_dets):
+        det = yolo_tensor[i]
+        if det[4] < thresh:
+            continue
+        
+        # Convert relative to absolute...x, w, y, h
+        factor = scaled_w/orig_w if orig_w >= orig_h else scaled_h/orig_h
+        
+        delta = scaled_w - factor*orig_w
+        det[0] = (scaled_w*det[0] - delta/2) * orig_w/(scaled_w-delta)
+        det[2] = det[2] * (1 + delta/scaled_w) * orig_w
+        
+        delta = scaled_h - factor*orig_h
+        det[1] = (scaled_h*det[1] - delta/2) * orig_h/(scaled_h-delta)
+        det[3] = det[3] * (1 + delta/scaled_h) * orig_h
+        
+        det = Detection(det)
+        det.prob = det.prob * (det.prob >= thresh)
+        
+        dets += [det]
+    return dets
+    
+
 if __name__ == '__main__':
     import numpy as np
     import cv2
 
-    net = TinyYOLOv3()    
+    net = TinyYOLOv3(width=416, height=416)
     load_weights('yolov3-tiny.weights', net)
     net.eval()
     
@@ -254,6 +324,8 @@ if __name__ == '__main__':
     #z_final = torch.from_numpy(z.transpose(2, 0, 1))
     
     z = cv2.imread('dog.jpg', cv2.IMREAD_COLOR)
+    output = z.copy()
+    orig_h, orig_w = output.shape[:2]
     #z = cv2.imread('sized.png', cv2.IMREAD_COLOR)
     z = cv2.cvtColor(z, cv2.COLOR_BGR2RGB)
     hscale = 416/z.shape[1]
@@ -269,17 +341,48 @@ if __name__ == '__main__':
     
     y = net(z_final.unsqueeze(0))
     
+    #output = np.array(z_final).transpose(1, 2, 0)
+    #output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    #output *= 255
+    #output = output.astype(np.uint8)
+    
     # Predictions
-    predictions = []
-    thresh = 0.5
-    y.shape
-    for item in range(y.shape[0]):
-        for row in range(y.shape[1]):
-            for col in range(y.shape[2]):
-                for n in range(y.shape[3]):
-                    tx, ty, tw, th, to = y[item, row, col, n, 0:5]
-                    if to < thresh:
-                        continue
-                    print(item, row, col, n, to)
+    # # NMS, cf. box.c
+    # predictions = sorted(range(y.shape[1]), key=lambda i: y[0,i,4], reverse=True)
+    # for iclass in range(80):
+    #     predictions = sorted(range(y.shape[1]), key=lambda i: y[0,i,5+iclass], reverse=True)
+    #     for k in range(len(predictions)):
+    #         if y[0,k,5+iclass] == 0:
+    #             continue
+    #         for l in range(k+1, len(predictions)):
+    # 
+    # 
+    #print(predictions)
+    #print(y[0,1262,4])
+    
+    
+    detections = get_yolo_detections(y[0], 80, 0.5, orig_w, orig_h, 416, 416)
+    for k in range(80):
+        detections = sorted(detections, key=lambda d: d.class_prob[k], reverse=True)
+        for i in range(len(detections)):
+            di = detections[i]
+            if di.class_prob[k] == 0:
+                continue
+            bi = di.box
+            for j in range(i+1, len(detections)):
+                dj = detections[j]
+                bj = dj.box
+                if bi.iou(bj) > 0.42:
+                    dj.prob[k] = 0
 
-    #dir(net.block3[-1])
+    for det in detections:
+        if max(det.prob) >= 0.5:
+            print(det.objectness, end = '')
+            for i,p in enumerate(det.prob):
+                if p > 0:
+                    print(f', ({i}, {p})', end='')
+            print()
+            cv2.rectangle(output, (int(det.box.x1), int(det.box.y1)), (int(det.box.x2), int(det.box.y2)), (255, 255, 0))
+        
+    cv2.imwrite('predictions.png', output)
+    
