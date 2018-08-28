@@ -1,0 +1,9 @@
+.DS_Store
+*.jpg
+*.png
+__pycache__
+*.weights
+venv
+notebooks
+.ipynb_checkpoints
+old
