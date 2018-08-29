@@ -197,6 +197,90 @@ class TinyYOLOv3(nn.Module):
         return (yolo_out, yolo_loss)
 
 
+class Darknet53Block(nn.Module):
+    def __init__(self, in_channels, layer1_channels, layer2_channels):
+        super().__init__()
+        self.conv1 = l.ConvolutionalLayer(in_channels, layer1_channels, 1, 1, 0)
+        self.conv2 = l.ConvolutionalLayer(layer1_channels, layer2_channels, 3, 1, 1)
+    
+    def forward(self, x):
+        res = x.clone()
+        x = self.conv2(self.conv1(x))
+        return x+res
+
+
+class YOLOv3(nn.Module):
+    def __init__(self,
+        input_width,
+        input_height,
+        anchors=[[(116,90),  (156,198),  (373,326)], [(30,61),  (62,45),  (59,119)], [(10,13),  (16,30),  (33,23)]],
+        ignore_thresh=0.7,
+        truth_thresh=1.0,
+        classes=80,
+        weights=None
+    ):
+        super().__init__()
+        self.input_w, self.input_h = input_width, input_height
+        self.ignore_thresh = ignore_thresh
+        self.truth_thresh = truth_thresh
+        self.classes = classes
+        self.images_seen = 0
+        
+        # Set masking indices for the flat anchor list.
+        # This seems kinda dumb...I should do it in a Pythonic way
+        # TODO: make this not dumb
+        # TODO: refactor and replace in all YOLO models
+        mask_count = 0
+        self.masks = []
+        for anchor_group in anchors:
+            mask = []
+            for j, _ in enumerate(anchor_group):
+                mask += [mask_count]
+                mask_count += 1
+            self.masks += [mask]
+        
+        self.anchors = [a for mask in anchors for a in mask]
+        
+        self.block1 = nn.ModuleList([
+            l.ConvolutionalLayer(3,  32, 3, 1, 1),
+            l.ConvolutionalLayer(32, 64, 3, 2, 1),
+            Darknet53Block(64, 32, 64),
+            l.ConvolutionalLayer(64, 128, 3, 2, 1),
+            Darknet53Block(128, 64, 128),
+            Darknet53Block(128, 64, 128),
+            l.ConvolutionalLayer(128, 256, 3, 2, 1),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            Darknet53Block(256, 128, 256),
+            l.ConvolutionalLayer(256, 512, 3, 2, 1),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            Darknet53Block(512, 256, 512),
+            l.ConvolutionalLayer(512, 1024, 3, 2, 1),
+            Darknet53Block(1024, 512, 1024),
+            Darknet53Block(1024, 512, 1024),
+            Darknet53Block(1024, 512, 1024),
+            Darknet53Block(1024, 512, 1024)
+        ])
+        
+        # TODO: yolo layers and various routings
+    
+    def forward(self, x, y=None):
+        for layer in self.block1:
+            x = layer(x)
+        return x
+
+
 def get_yolo_detections(tensor, thresh=0.5):
     if len(tensor.shape) > 2:
         raise utils.ShapeError('can only get detections for a single image')
