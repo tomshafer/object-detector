@@ -160,7 +160,7 @@ class YOLOv3Layer(nn.Module):
                         for i, (pw, ph) in enumerate(self.anchors):
                             pw /= self.input_width
                             ph /= self.input_height
-                            prior_box = Box(0, 0, pw, ph)
+                            prior_box = yolo.Box(0, 0, pw, ph)
                             iou = truth_shift.iou(prior_box)
                             if iou > best_iou:
                                 best_n = i

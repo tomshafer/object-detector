@@ -123,7 +123,6 @@ class TinyYOLOv3(nn.Module):
                 mask += [mask_count]
                 mask_count += 1
             self.masks += [mask]
-        print(self.masks)
         
         self.anchors = [a for mask in anchors for a in mask]
         
