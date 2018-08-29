@@ -11,70 +11,33 @@ from . import utils
 
 
 class Box(object):
-    # TODO: refactor...I don't need x1,x2,y1.y2
     def __init__(self, xc, yc, w, h):
         assert w > 0
         assert h > 0
         # Internal representation is corners
-        self.x1 = xc-w/2
-        self.x2 = xc+w/2
-        self.y1 = yc-h/2
-        self.y2 = yc+h/2
-
+        self.x = xc
+        self.y = yc
+        self.w = w
+        self.h = h
+    
+    def get_corner_coords(self):
+        return (self.x-self.w/2, self.y-self.h/2), (self.x+self.w/2, self.y+self.h/2)
+    
     def __repr__(self):
-        return f'<Box(({self.x1}, {self.y1}), ({self.x2}, {self.y2}))>'
-
+        (x1, y1), (x2, y2) = self.get_corner_coords()
+        return f'<Box(({x1:.3f}, {y1:.3f}), ({x2:.3f}, {y2:.3f}))>'
+    
     @property
     def area(self):
-        return (self.x2-self.x1)*(self.y2-self.y1)
-    
-    @property
-    def x(self):
-        return (self.x1+self.x2)/2
-    
-    @x.setter
-    def x(self, value):
-        w = self.w
-        self.x1 = value-w/2
-        self.x2 = value+w/2
-    
-    @property
-    def y(self):
-        return (self.y1+self.y2)/2
-    
-    @y.setter
-    def y(self, value):
-        h = self.h
-        self.y1 = value-h
-        self.y2 = value+h
-    
-    @property
-    def w(self):
-        return self.x2-self.x1
-    
-    @w.setter
-    def w(self, value):
-        sx = self.x
-        self.x1 = sx-value/2
-        self.x2 = sx+value/2
-
-    @property
-    def h(self):
-        return self.y2-self.y1
-    
-    @h.setter
-    def h(self, value):
-        sy = self.y
-        self.y1 = sy-value/2
-        self.y2 = sy+value/2
+        return self.w*self.h
     
     def intersection(self, other):
-        if self.x1 > other.x2 or self.x2 < other.x1 \
-        or self.y1 > other.y2 or self.y2 < other.y1:
+        (sx1, sy1), (sx2, sy2) = self.get_corner_coords()
+        (ox1, oy1), (ox2, oy2) = other.get_corner_coords()
+        if sx1 > ox2 or sx2 < ox1 or sy1 > oy2 or sy2 < oy1:
             return 0
-
-        w = min(self.x2, other.x2)-max(self.x1, other.x1)
-        h = min(self.y2, other.y2)-max(self.y1, other.y1)
+        w = min(sx2, ox2)-max(sx1, ox1)
+        h = min(sy2, oy2)-max(sy1, oy1)
         return w*h
 
     def iou(self, other):
@@ -82,18 +45,13 @@ class Box(object):
         u = self.area+other.area-i
         return i/u
     
-    def as_center(self, dtype=float):
-        return [
-            dtype((self.x1+self.x2)/2),
-            dtype((self.y1+self.y2)/2),
-            dtype(self.x2-self.x1),
-            dtype(self.y2-self.y1)]
-    
-    def corner(self, pos='tl'):
+    def corner_int(self, pos='tl'):
         if pos == 'tl':
-            return (int(self.x1), int(self.y1))
+            (x1, y1), _ = self.get_corner_coords()
+            return (int(x1), int(y1))
         if pos == 'br':
-            return (int(self.x2), int(self.y2))
+            _, (x2, y2) = self.get_corner_coords()
+            return (int(x2), int(y2))
         raise ValueError(f'unknown position: "{pos}"')
         
 
@@ -276,14 +234,14 @@ def rescale_yolo_predictions(detections, orig_w, orig_h):
         if aspect > 1:
             # Wider than tall -- vertical boxes need to be adjusted
             box.x *= orig_w
-            box.w *= orig_w
-            box.h *= orig_h * orig_h/orig_w
             box.y =  box.y*orig_w - (orig_w-orig_h)/2
+            box.w *= orig_w
+            box.h *= orig_h * (2 - orig_h/orig_w)
         else:
             # Taller than wide -- horizontal boxes need to be adjusted
             box.y *= orig_h
             box.h *= orig_h
-            box.w *= orig_w*orig_w/orig_h
+            box.w *= orig_w * (2 - orig_w/orig_h)
             box.x *= box.x*orig_h - (orig_h-orig_w)/2
     return detections
 
@@ -311,7 +269,7 @@ def load_truths(file):
     return truths.reshape(-1, 5)
 
 
-def letterbox_input_cv2(image, truths, out_w, out_h):
+def letterbox_input_cv2(image, out_w, out_h, truths=None):
     if image.shape[-1] != 3:
         raise utils.ShapeError('expected CV2 channels-last format')
     
@@ -336,11 +294,13 @@ def letterbox_input_cv2(image, truths, out_w, out_h):
     
     # Rescale the ground truths, depending on which dimension is squished.
     # The heights/widths will be squished, and the centroids will be moved.
-    assert delta_w == 0 or delta_h == 0
-    if delta_h > 0:
-        truths[:,3] =  truths[:,3]*tmp_h/out_h
-        truths[:,1] = (truths[:,1]*tmp_h + delta_h/2) / out_h
-    else:
-        truths[:,2] =  truths[:,2]*tmp_w/out_w
-        truths[:,0] = (truths[:,0]*tmp_w + delta_w/2) / out_w
-    return letterboxed, truths
+    if truths is not None:
+        assert delta_w == 0 or delta_h == 0
+        if delta_h > 0:
+            truths[:,3] =  truths[:,3]*tmp_h/out_h
+            truths[:,1] = (truths[:,1]*tmp_h + delta_h/2) / out_h
+        else:
+            truths[:,2] =  truths[:,2]*tmp_w/out_w
+            truths[:,0] = (truths[:,0]*tmp_w + delta_w/2) / out_w
+        return letterboxed, truths
+    return letterboxed

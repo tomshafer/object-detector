@@ -29,13 +29,11 @@ if __name__ == '__main__':
     
     # Run YOLO on the example image
     input = yolo.load_image_cv2(os.path.join(base_dir, 'dog.jpg'))
-    truths = yolo.load_truths(os.path.join(base_dir, 'dog.txt'))
     orig_h, orig_w = input.shape[:2]
     output_img = input[:]
     
-    input, truths = yolo.letterbox_input_cv2(input, truths, 416, 416)
+    input = yolo.letterbox_input_cv2(input, 416, 416)
     input = torch.tensor(input.transpose(2, 0, 1))
-    truths = torch.tensor(truths)
     
     model = yolo.TinyYOLOv3(416, 416, weights='yolov3-tiny.weights')
     model.eval()
@@ -52,9 +50,17 @@ if __name__ == '__main__':
     
     np.random.seed(1024)
     for det in detections:
-        color = tuple(map(lambda x: np.asscalar(np.uint8(x)), np.random.randint(0, 255, 3)))
-        output_img = cv2.rectangle(output_img, det.box.corner('tl'), det.box.corner('br'), color, 2)
-        output_img = cv2.putText(output_img, str(det.max_probability), det.box.corner('tl'),
-                                 cv2.FONT_HERSHEY_PLAIN, 1, color, 2)
+        print('Class {:>2d}: {:.0f}%'.format(
+            det.most_probable_class, 100*det.probs[det.most_probable_class]))
+        # http://answers.opencv.org/question/185393/typeerror-scalar-value-for-argument-color-is-not-numeric/
+        color = tuple(map(
+            lambda x: np.asscalar(np.uint8(x)),
+            np.random.randint(0, 255, 3)))
+        output_img = cv2.rectangle(
+            output_img, det.box.corner_int('tl'), det.box.corner_int('br'),
+            color, 2)
+        output_img = cv2.putText(
+            output_img, '{:.0f}%'.format(100*det.max_probability),
+            det.box.corner_int('tl'), cv2.FONT_HERSHEY_PLAIN, 1, color, 2)
     
     cv2.imwrite('predictions.png', output_img)
