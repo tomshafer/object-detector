@@ -1,7 +1,7 @@
 
 import os
 import sys
-sys.path.append('..')
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 import cv2
 import numpy as np
@@ -35,7 +35,7 @@ if __name__ == '__main__':
     input = yolo.letterbox_input_cv2(input, 416, 416)
     input = torch.tensor(input.transpose(2, 0, 1))
     
-    model = yolo.TinyYOLOv3(416, 416, weights='yolov3-tiny.weights')
+    model = yolo.TinyYOLOv3(416, 416, weights=weights_file)
     model.eval()
     with torch.no_grad():
         output, loss = model(input.unsqueeze(0))
@@ -63,4 +63,4 @@ if __name__ == '__main__':
             output_img, '{:.0f}%'.format(100*det.max_probability),
             det.box.corner_int('tl'), cv2.FONT_HERSHEY_PLAIN, 1, color, 2)
     
-    cv2.imwrite('predictions.png', output_img)
+    cv2.imwrite(os.path.join(base_dir, 'predictions.png'), output_img)
