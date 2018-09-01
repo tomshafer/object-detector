@@ -7,3 +7,5 @@ venv
 notebooks
 .ipynb_checkpoints
 old
+.vscode
+.pylintrc
