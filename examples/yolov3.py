@@ -14,14 +14,14 @@ from networks.darknet import yolo
 if __name__ == '__main__':
     # Download YOLO v3 weights
     base_dir = os.path.dirname(__file__)
-    weights_file = os.path.join(base_dir, 'yolov3-tiny.weights')
+    weights_file = os.path.join(base_dir, 'yolov3.weights')
     if not os.path.exists(weights_file):
         while True:
             response = input('Cannot find weights file. Download? (y/n) ')
             if response.strip().lower()[0] == 'y':
                 print('Downloading...')
                 request.urlretrieve(
-                    'https://pjreddie.com/media/files/yolov3-tiny.weights',
+                    'https://pjreddie.com/media/files/yolov3.weights',
                     weights_file)
                 break
             elif response.strip().lower()[0] == 'n':
@@ -36,12 +36,12 @@ if __name__ == '__main__':
     input = yolo.letterbox_input_cv2(input, 416, 416)
     input = torch.tensor(input.transpose(2, 0, 1))
 
-    model = yolo.TinyYOLOv3(416, 416, weights=weights_file)
+    model = yolo.YOLOv3(416, 416, weights=weights_file)
     model.eval()
     with torch.no_grad():
         output, loss = model(input.unsqueeze(0))
         detections = yolo.get_yolo_detections(output[0], 0.5)
-        detections = yolo.nms_yolo_detections(detections, 80, prob_thresh=0.5)
+        #detections = yolo.nms_yolo_detections(detections, 80, prob_thresh=0.5)
         detections = yolo.rescale_yolo_predictions(detections, orig_w, orig_h)
 
     # Convert to OpenCV format, add rectangles, etc.
@@ -61,7 +61,7 @@ if __name__ == '__main__':
             output_img, det.box.corner_int('tl'), det.box.corner_int('br'),
             color, 2)
         output_img = cv2.putText(
-            output_img, '{:.0f}%'.format(100*det.max_probability),
-            det.box.corner_int('tl'), cv2.FONT_HERSHEY_PLAIN, 1, color, 2)
+            output_img, '{:.0f}%'.format(round(100*det.max_probability)),
+            det.box.corner_int('tl'), cv2.FONT_HERSHEY_PLAIN, 2, color, 2)
 
     cv2.imwrite(os.path.join(base_dir, 'predictions.png'), output_img)

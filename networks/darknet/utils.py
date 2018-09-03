@@ -36,7 +36,7 @@ def load_weights(file, network):
         else:
             offset = _load_into_tensor(module.conv.bias, weights, offset, n)
         offset = _load_into_tensor(module.conv.weight, weights, offset, n * c * k**2)
-    
+
     if offset != weights.size:
         print('Warning: offset != weights.size in load_weights.',
               'offset = {}, weights.size = {}'.format(offset, weights.size))

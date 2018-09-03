@@ -1,6 +1,6 @@
 """YOLO models and related helpers.
 
-The actual YOLOv3 layers is in darknet/layers.py.
+The actual YOLOv3 layer is in darknet/layers.py.
 """
 
 import copy
@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from . import layers as l
+from .darknet53 import _ResidualBlock
+from . import layers as ls
 from . import utils
 
 
@@ -104,12 +105,15 @@ class TinyYOLOv3(nn.Module):
             self,
             input_width,
             input_height,
-            anchors=[[(81, 82), (135, 169), (344, 319)], [(10, 14), (23, 27), (37, 58)]],
+            anchors=[
+                [(81, 82), (135, 169), (344, 319)],
+                [(10, 14), (23, 27), (37, 58)]
+            ],
             ignore_thresh=0.7,
             truth_thresh=1.0,
             classes=80,
             weights=None
-        ):
+    ):
         super().__init__()
         self.input_w, self.input_h = input_width, input_height
         self.ignore_thresh = ignore_thresh
@@ -118,49 +122,37 @@ class TinyYOLOv3(nn.Module):
         self.images_seen = 0
 
         # Set masking indices for the flat anchor list.
-        # This seems kinda dumb...I should do it in a Pythonic way
-        # TODO: make this not dumb
-        mask_count = 0
-        self.masks = []
-        for anchor_group in anchors:
-            mask = []
-            for _ in anchor_group:
-                mask += [mask_count]
-                mask_count += 1
-            self.masks += [mask]
-
-        self.anchors = [a for mask in anchors for a in mask]
-
+        self.anchors, self.masks = _flatten_anchors(anchors)
 
         self.block1 = nn.ModuleList([
-            l.ConvolutionalLayer(3,    16,  3, 1, 1), l.MaxPoolLayer(2, 2),
-            l.ConvolutionalLayer(16,   32,  3, 1, 1), l.MaxPoolLayer(2, 2),
-            l.ConvolutionalLayer(32,   64,  3, 1, 1), l.MaxPoolLayer(2, 2),
-            l.ConvolutionalLayer(64,   128, 3, 1, 1), l.MaxPoolLayer(2, 2),
-            l.ConvolutionalLayer(128,  256, 3, 1, 1)
+            ls.ConvolutionalLayer(3,    16,  3, 1, 1), ls.MaxPoolLayer(2, 2),
+            ls.ConvolutionalLayer(16,   32,  3, 1, 1), ls.MaxPoolLayer(2, 2),
+            ls.ConvolutionalLayer(32,   64,  3, 1, 1), ls.MaxPoolLayer(2, 2),
+            ls.ConvolutionalLayer(64,   128, 3, 1, 1), ls.MaxPoolLayer(2, 2),
+            ls.ConvolutionalLayer(128,  256, 3, 1, 1)
         ])
 
         self.block2 = nn.ModuleList([
-            l.MaxPoolLayer(2, 2),
-            l.ConvolutionalLayer(256,  512,  3, 1, 1), l.MaxPoolLayer(2, 1, 1),
-            l.ConvolutionalLayer(512,  1024, 3, 1, 1),
-            l.ConvolutionalLayer(1024, 256,  1, 1, 0)
+            ls.MaxPoolLayer(2, 2),
+            ls.ConvolutionalLayer(256,  512,  3, 1, 1), ls.MaxPoolLayer(2, 1, 1),
+            ls.ConvolutionalLayer(512,  1024, 3, 1, 1),
+            ls.ConvolutionalLayer(1024, 256,  1, 1, 0)
         ])
 
         self.block3 = nn.ModuleList([
-            l.ConvolutionalLayer(256, 512, 3, 1, 1),
-            l.ConvolutionalLayer(512, 255, 1, 1, 0, batch_normalize=False, activation=False),
-            l.YOLOv3Layer(input_width=self.input_w, input_height=self.input_h,
+            ls.ConvolutionalLayer(256, 512, 3, 1, 1),
+            ls.ConvolutionalLayer(512, 255, 1, 1, 0, batch_normalize=False, activation=False),
+            ls.YOLOv3Layer(input_width=self.input_w, input_height=self.input_h,
                           classes=self.classes, anchors=self.anchors, mask=self.masks[0],
                           ignore_thresh=self.ignore_thresh, truth_thresh=self.truth_thresh)
         ])
 
-        self.block4 = l.ConvolutionalLayer(256, 128, 1, 1, 0)
+        self.block4 = ls.ConvolutionalLayer(256, 128, 1, 1, 0)
 
         self.block5 = nn.ModuleList([
-            l.ConvolutionalLayer(384, 256, 3, 1, 1),
-            l.ConvolutionalLayer(256, 255, 1, 1, 0, batch_normalize=False, activation=False),
-            l.YOLOv3Layer(input_width=self.input_w, input_height=self.input_h,
+            ls.ConvolutionalLayer(384, 256, 3, 1, 1),
+            ls.ConvolutionalLayer(256, 255, 1, 1, 0, batch_normalize=False, activation=False),
+            ls.YOLOv3Layer(input_width=self.input_w, input_height=self.input_h,
                           classes=self.classes, anchors=self.anchors, mask=self.masks[1],
                           ignore_thresh=self.ignore_thresh, truth_thresh=self.truth_thresh)
         ])
@@ -197,26 +189,9 @@ class TinyYOLOv3(nn.Module):
             x = layer(x)
         yolo_out2, yolo_loss2 = self.block5[-1](x, y)
 
-        yolo_out  = torch.cat((yolo_out1, yolo_out2), dim=1)
+        yolo_out = torch.cat((yolo_out1, yolo_out2), dim=1)
         yolo_loss = yolo_loss1+yolo_loss2
         return (yolo_out, yolo_loss)
-
-
-class _ResidualBlock(nn.Module):
-    """Darknet 53-style residual block.
-
-    Two convolutional layers, each with Darknet-style batch normalization
-    and leaky ReLU activation.
-    """
-    def __init__(self, in_channels, layer1_channels, layer2_channels):
-        super().__init__()
-        self.conv1 = l.ConvolutionalLayer(in_channels, layer1_channels, 1, 1, 0)
-        self.conv2 = l.ConvolutionalLayer(layer1_channels, layer2_channels, 3, 1, 1)
-
-    def forward(self, x):
-        res = x.clone()
-        x = self.conv2(self.conv1(x))
-        return x+res
 
 
 class YOLOv3(nn.Module):
@@ -233,37 +208,24 @@ class YOLOv3(nn.Module):
             truth_thresh=1.0,
             classes=80,
             weights=None
-        ):
+    ):
         super().__init__()
         self.input_w, self.input_h = input_width, input_height
         self.ignore_thresh = ignore_thresh
         self.truth_thresh = truth_thresh
         self.classes = classes
         self.images_seen = 0
-
         # Set masking indices for the flat anchor list.
-        # This seems kinda dumb...I should do it in a Pythonic way
-        # TODO: make this not dumb
-        # TODO: refactor and replace in all YOLO models
-        mask_count = 0
-        self.masks = []
-        for anchor_group in anchors:
-            mask = []
-            for j, _ in enumerate(anchor_group):
-                mask += [mask_count]
-                mask_count += 1
-            self.masks += [mask]
-
-        self.anchors = [a for mask in anchors for a in mask]
+        self.anchors, self.masks = _flatten_anchors(anchors)
 
         self.block1 = nn.ModuleList([
-            l.ConvolutionalLayer(3,  32, 3, 1, 1),
-            l.ConvolutionalLayer(32, 64, 3, 2, 1),
-            _ResidualBlock(64, 32, 64),
-            l.ConvolutionalLayer(64, 128, 3, 2, 1),
+            ls.ConvolutionalLayer(3,  32, 3, 1, 1),     # Layer 0
+            ls.ConvolutionalLayer(32, 64, 3, 2, 1),
+            _ResidualBlock(64, 32, 64),                 # Layer 4
+            ls.ConvolutionalLayer(64, 128, 3, 2, 1),
             _ResidualBlock(128, 64, 128),
-            _ResidualBlock(128, 64, 128),
-            l.ConvolutionalLayer(128, 256, 3, 2, 1),
+            _ResidualBlock(128, 64, 128),               # Layer 11
+            ls.ConvolutionalLayer(128, 256, 3, 2, 1),
             _ResidualBlock(256, 128, 256),
             _ResidualBlock(256, 128, 256),
             _ResidualBlock(256, 128, 256),
@@ -271,29 +233,145 @@ class YOLOv3(nn.Module):
             _ResidualBlock(256, 128, 256),
             _ResidualBlock(256, 128, 256),
             _ResidualBlock(256, 128, 256),
-            _ResidualBlock(256, 128, 256),
-            l.ConvolutionalLayer(256, 512, 3, 2, 1),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            _ResidualBlock(512, 256, 512),
-            l.ConvolutionalLayer(512, 1024, 3, 2, 1),
-            _ResidualBlock(1024, 512, 1024),
-            _ResidualBlock(1024, 512, 1024),
-            _ResidualBlock(1024, 512, 1024),
-            _ResidualBlock(1024, 512, 1024)
+            _ResidualBlock(256, 128, 256)               # Layer 36
         ])
 
-        # TODO: yolo layers and various routings
+        self.block2 = nn.ModuleList([
+            ls.ConvolutionalLayer(256, 512, 3, 2, 1),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512),
+            _ResidualBlock(512, 256, 512)               # Layer 61
+        ])
+
+        self.block3 = nn.ModuleList([
+            ls.ConvolutionalLayer(512, 1024, 3, 2, 1),
+            _ResidualBlock(1024, 512, 1024),
+            _ResidualBlock(1024, 512, 1024),
+            _ResidualBlock(1024, 512, 1024),
+            _ResidualBlock(1024, 512, 1024),            # Layer 74
+            ls.ConvolutionalLayer(1024, 512, 1, 1, 0),
+            ls.ConvolutionalLayer(512, 1024, 3, 1, 1),
+            ls.ConvolutionalLayer(1024, 512, 1, 1, 0),
+            ls.ConvolutionalLayer(512, 1024, 3, 1, 1),
+            ls.ConvolutionalLayer(1024, 512, 1, 1, 0)   # Layer 79
+        ])
+
+        self.yolo1 = nn.ModuleList([
+            ls.ConvolutionalLayer(512, 1024, 3, 1, 1),
+            ls.ConvolutionalLayer(1024, 255, 1, 1, 0, False, False),
+            ls.YOLOv3Layer(
+                input_width=self.input_w,
+                input_height=self.input_h,
+                classes=self.classes,
+                anchors=self.anchors,
+                mask=self.masks[0],
+                ignore_thresh=self.ignore_thresh,
+                truth_thresh=self.truth_thresh)        # Layer 82
+        ])
+
+        self.block4a = ls.ConvolutionalLayer(512, 256, 1, 1, 0)
+
+        self.block4b = nn.ModuleList([
+            ls.ConvolutionalLayer(768, 256,  1, 1, 0),
+            ls.ConvolutionalLayer(256, 512, 3, 1, 1),
+            ls.ConvolutionalLayer(512, 256, 1, 1, 0),
+            ls.ConvolutionalLayer(256, 512, 3, 1, 1),
+            ls.ConvolutionalLayer(512, 256, 1, 1, 0)    # Layer 91
+        ])
+
+        self.yolo2 = nn.ModuleList([
+            ls.ConvolutionalLayer(256, 512, 3, 1, 1),
+            ls.ConvolutionalLayer(512, 255, 1, 1, 0, False, False),
+            ls.YOLOv3Layer(
+                input_width=self.input_w,
+                input_height=self.input_h,
+                classes=self.classes,
+                anchors=self.anchors,
+                mask=self.masks[1],
+                ignore_thresh=self.ignore_thresh,
+                truth_thresh=self.truth_thresh)         # Layer 94
+        ])
+
+        self.block5a = ls.ConvolutionalLayer(256, 128, 1, 1, 0)
+
+        self.block5b = nn.ModuleList([
+            ls.ConvolutionalLayer(384, 128,  1, 1, 0),
+            ls.ConvolutionalLayer(128, 256, 3, 1, 1),
+            ls.ConvolutionalLayer(256, 128, 1, 1, 0),
+            ls.ConvolutionalLayer(128, 256, 3, 1, 1),
+            ls.ConvolutionalLayer(256, 128, 1, 1, 0)
+        ])
+
+        self.yolo3 = nn.ModuleList([
+            ls.ConvolutionalLayer(128, 256, 3, 1, 1),
+            ls.ConvolutionalLayer(256, 255, 1, 1, 0, False, False),
+            ls.YOLOv3Layer(
+                input_width=self.input_w,
+                input_height=self.input_h,
+                classes=self.classes,
+                anchors=self.anchors,
+                mask=self.masks[2],
+                ignore_thresh=self.ignore_thresh,
+                truth_thresh=self.truth_thresh)         # Layer 106
+        ])
+
+        if weights is not None:
+            utils.load_weights(weights, self)
 
     def forward(self, x, y=None):
+        if self.training:
+            self.images_seen += x.shape[0]
+
         for layer in self.block1:
             x = layer(x)
-        return x
+        layer_36 = x.clone()
+
+        for layer in self.block2:
+            x = layer(x)
+        layer_61 = x.clone()
+
+        for layer in self.block3:
+            x = layer(x)
+        layer_79 = x.clone()
+
+        # YOLO 1
+        for layer in self.yolo1[:-1]:
+            x = layer(x)
+        yolo_out1, yolo_loss1 = self.yolo1[-1](x, y)
+
+        # Route, upscale, conv, YOLO 2
+        x = F.interpolate(self.block4a(layer_79), scale_factor=2)
+        x = torch.cat((x, layer_61), dim=1)
+
+        for layer in self.block4b:
+            x = layer(x)
+        layer_91 = x.clone()
+
+        for layer in self.yolo2[:-1]:
+            x = layer(x)
+
+        yolo_out2, yolo_loss2 = self.yolo2[-1](x, y)
+
+        # Route, upscale, conv, YOLO 3
+        x = F.interpolate(self.block5a(layer_91), scale_factor=2)
+        x = torch.cat((x, layer_36), dim=1)
+
+        for layer in self.block5b:
+            x = layer(x)
+
+        for layer in self.yolo3[:-1]:
+            x = layer(x)
+
+        yolo_out3, yolo_loss3 = self.yolo3[-1](x, y)
+
+        yolo_out = torch.cat((yolo_out1, yolo_out2, yolo_out3), dim=1)
+        yolo_loss = yolo_loss1+yolo_loss2+yolo_loss3
+        return (yolo_out, yolo_loss)
 
 
 def get_yolo_detections(tensor, thresh=0.5):
@@ -398,10 +476,38 @@ def letterbox_input_cv2(image, out_w, out_h, truths=None):
     if truths is not None:
         assert delta_w == 0 or delta_h == 0
         if delta_h > 0:
-            truths[:, 3] =  truths[:, 3]*tmp_h/out_h
+            truths[:, 3] = truths[:, 3]*tmp_h/out_h
             truths[:, 1] = (truths[:, 1]*tmp_h + delta_h/2) / out_h
         else:
-            truths[:, 2] =  truths[:, 2]*tmp_w/out_w
+            truths[:, 2] = truths[:, 2]*tmp_w/out_w
             truths[:, 0] = (truths[:, 0]*tmp_w + delta_w/2) / out_w
         return letterboxed, truths
     return letterboxed
+
+
+def _flatten_anchors(anchor_lists):
+    """Return a flattened set of anchor boxes.
+
+    Take an iterable of iterables (a list of anchor coordinates) and return
+        (1) a flattened list of anchors and
+        (2) lists of "mask" indices mapping the flattened anchor list onto the
+            original list.
+
+    Arguments:
+        anchor_lists {iterable} -- list of lists of anchor boxes per YOLO layer
+
+    """
+    # Generate the mask lists
+    masks = []
+    mask_count = 0
+    for group in anchor_lists:
+        this_mask_set = []
+        for _ in group:
+            this_mask_set.append(mask_count)
+            mask_count += 1
+        masks.append(this_mask_set)
+
+    # Flatten the anchor list
+    anchors = [a for mask in anchor_lists for a in mask]
+
+    return (anchors, masks)
